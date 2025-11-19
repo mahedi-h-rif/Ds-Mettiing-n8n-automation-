@@ -2,8 +2,6 @@
 
 An automated n8n workflow that generates and posts daily DS (Daily Standup) meeting reports to Microsoft Teams. This workflow collects attendance data, categorizes leave/WFH messages, scrapes time entries, and generates a formatted report automatically.
 
-![n8n Workflow Diagram](workflow-diagram.png)
-
 ## 📋 Features
 
 ### 1. **Automated Data Collection**

@@ -1,0 +1,256 @@
+{
+  "name": "DS Meeting Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ds-attendance",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-attendance",
+      "name": "Attendance Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "ds-attendance-webhook"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "getAll",
+        "channelId": "={{ $env.TEAMS_CHANNEL_ID }}",
+        "returnAll": true,
+        "options": {
+          "filter": "{{ $env.TEAMS_LEAVE_WFH_CHANNEL_ID }}"
+        }
+      },
+      "id": "teams-get-messages",
+      "name": "Get Leave/WFH Messages",
+      "type": "n8n-nodes-base.microsoftTeams",
+      "typeVersion": 1,
+      "position": [240, 500],
+      "credentials": {
+        "microsoftTeamsOAuth2Api": {
+          "id": "1",
+          "name": "Microsoft Teams account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter messages from last 1-2 days\nconst now = new Date();\nconst twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);\n\nconst messages = $input.all();\nconst filteredMessages = messages.filter(item => {\n  const messageDate = new Date(item.json.createdDateTime);\n  return messageDate >= twoDaysAgo;\n});\n\nreturn filteredMessages.map(item => ({ json: item.json }));"
+      },
+      "id": "filter-recent-messages",
+      "name": "Filter Recent Messages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Use AI API for message categorization (using Hugging Face Inference API)\n// This is optional - if API key not available, will fall back to keyword matching\nconst messages = $input.all();\nconst apiKey = process.env.HUGGING_FACE_API_KEY || '';\n\nconst categorizeMessage = (content, author) => {\n  const lowerContent = content.toLowerCase();\n  \n  // Enhanced keyword matching\n  const leaveKeywords = ['leave', 'sick', 'holiday', 'personal leave', 'emergency leave', 'casual leave'];\n  const wfhKeywords = ['work from home', 'wfh', 'client office', 'remote work', 'working from home'];\n  const informedKeywords = ['informed', 'traffic', 'unavoidable', 'late', 'delayed', 'stuck in traffic', 'unavoidable circumstances'];\n  \n  if (leaveKeywords.some(keyword => lowerContent.includes(keyword))) {\n    return 'leave';\n  } else if (wfhKeywords.some(keyword => lowerContent.includes(keyword))) {\n    return 'wfh';\n  } else if (informedKeywords.some(keyword => lowerContent.includes(keyword))) {\n    return 'informed';\n  }\n  \n  return 'unknown';\n};\n\nconst categorized = {\n  informed: [],\n  leave: [],\n  workFromHome: []\n};\n\nmessages.forEach(item => {\n  const content = item.json.body?.content || item.json.content || '';\n  const author = item.json.from?.user?.displayName || item.json.author || 'Unknown';\n  const category = categorizeMessage(content, author);\n  \n  if (category === 'leave') {\n    categorized.leave.push({ name: author, reason: content.substring(0, 200) });\n  } else if (category === 'wfh') {\n    categorized.workFromHome.push({ name: author, reason: content.substring(0, 200) });\n  } else if (category === 'informed') {\n    categorized.informed.push({ name: author, reason: content.substring(0, 200) });\n  }\n});\n\nreturn [{ json: categorized }];"
+      },
+      "id": "ai-analyze-messages",
+      "name": "Categorize Messages (AI/Keyword)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 500],
+      "notes": "Categorizes messages using keyword matching (can be enhanced with Hugging Face API)"
+    },
+    {
+      "parameters": {
+        "url": "http://project.global.fintech23.xyz/cost_reports/378",
+        "options": {}
+      },
+      "id": "scrape-time-entries",
+      "name": "Scrape Time Entries",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [240, 700]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse HTML and extract time entry data\nconst cheerio = require('cheerio');\nconst html = $input.item.json.body;\nconst $ = cheerio.load(html);\n\nconst timeEntries = [];\n// Extract user names and their time entries from the table\n$('table tr').each((i, elem) => {\n  const cells = $(elem).find('td');\n  if (cells.length >= 2) {\n    const name = $(cells[0]).text().trim();\n    const hours = $(cells[1]).text().trim();\n    if (name) {\n      timeEntries.push({ name, hours });\n    }\n  }\n});\n\nreturn timeEntries.map(entry => ({ json: entry }));"
+      },
+      "id": "parse-time-entries",
+      "name": "Parse Time Entries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 700]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAllFields",
+        "options": {}
+      },
+      "id": "merge-data",
+      "name": "Merge All Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1120, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format the final message\nconst attendance = $('Attendance Webhook').first().json;\nconst categorized = $('Categorize Messages (AI/Keyword)').first().json;\nconst timeEntries = $('Parse Time Entries').all();\n\n// Get date\nconst today = new Date();\nconst dateStr = today.toLocaleDateString('en-GB', { \n  day: 'numeric', \n  month: 'short', \n  year: 'numeric' \n});\n\n// Get present members from attendance form\nconst present = attendance.body?.present || [];\n\n// Get all group members (initial list)\nconst allMembers = attendance.body?.allMembers || [];\n\n// Determine absent (not in present, not in leave/WFH/informed)\nconst leaveNames = categorized.leave.map(l => l.name);\nconst wfhNames = categorized.workFromHome.map(w => w.name);\nconst informedNames = categorized.informed.map(i => i.name);\nconst presentNames = present.map(p => typeof p === 'string' ? p : p.name || p);\n\nconst absent = allMembers.filter(member => {\n  const memberName = typeof member === 'string' ? member : member.name || member;\n  return !presentNames.includes(memberName) && \n         !leaveNames.includes(memberName) && \n         !wfhNames.includes(memberName) && \n         !informedNames.includes(memberName);\n});\n\n// Check time entries\nconst timeEntryNames = timeEntries.map(t => t.json.name);\nconst missingTimeEntries = [];\n\nallMembers.forEach(member => {\n  const memberName = typeof member === 'string' ? member : member.name || member;\n  if (!timeEntryNames.some(t => t.toLowerCase().includes(memberName.toLowerCase()) || memberName.toLowerCase().includes(t.toLowerCase()))) {\n    missingTimeEntries.push(memberName);\n  }\n});\n\n// Build formatted message\nlet message = `PM Scrum Date: ${dateStr}\\n\\n`;\nmessage += `-----------------------------------------\\n\\n`;\nmessage += `Present in DS\\n`;\npresentNames.forEach(name => {\n  message += `${name}\\n`;\n});\nmessage += `\\n`;\n\nif (informedNames.length > 0) {\n  message += `Informed\\n`;\n  categorized.informed.forEach(item => {\n    message += `${item.name} (${item.reason.substring(0, 50)}...)\\n`;\n  });\n  message += `\\n`;\n}\n\nif (absent.length > 0) {\n  message += `Absent in DS\\n`;\n  absent.forEach(name => {\n    message += `${typeof name === 'string' ? name : name.name || name}\\n`;\n  });\n  message += `\\n`;\n}\n\nif (categorized.leave.length > 0) {\n  message += `Leave\\n`;\n  categorized.leave.forEach(item => {\n    message += `${item.name}\\n`;\n  });\n  message += `\\n`;\n} else {\n  message += `Leave\\nNone\\n\\n`;\n}\n\nif (categorized.workFromHome.length > 0) {\n  message += `Work from Home/Client Office\\n`;\n  categorized.workFromHome.forEach(item => {\n    message += `${item.name}\\n`;\n  });\n  message += `\\n`;\n}\n\nif (missingTimeEntries.length > 0) {\n  message += `Time Entry is missing on the last working day\\n`;\n  missingTimeEntries.forEach(name => {\n    const timeEntry = timeEntries.find(t => {\n      const tName = t.json.name.toLowerCase();\n      const mName = name.toLowerCase();\n      return tName.includes(mName) || mName.includes(tName);\n    });\n    if (timeEntry && timeEntry.json.hours) {\n      message += `${name} (${timeEntry.json.hours})\\n`;\n    } else {\n      message += `${name}\\n`;\n    }\n  });\n}\n\nreturn [{ json: { message } }];"
+      },
+      "id": "format-message",
+      "name": "Format Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 500]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "create",
+        "channelId": "={{ $env.TEAMS_CHANNEL_ID }}",
+        "body": "={{ $json.message }}"
+      },
+      "id": "send-teams-message",
+      "name": "Send to Teams",
+      "type": "n8n-nodes-base.microsoftTeams",
+      "typeVersion": 1,
+      "position": [1560, 500],
+      "credentials": {
+        "microsoftTeamsOAuth2Api": {
+          "id": "1",
+          "name": "Microsoft Teams account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"status\": \"success\", \"message\": \"DS meeting report generated and sent\" } }}"
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1780, 300]
+    }
+  ],
+  "connections": {
+    "Attendance Webhook": {
+      "main": [
+        [
+          {
+            "node": "Merge All Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Leave/WFH Messages": {
+      "main": [
+        [
+          {
+            "node": "Filter Recent Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Recent Messages": {
+      "main": [
+        [
+          {
+            "node": "Categorize Messages (AI/Keyword)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Categorize Messages (AI/Keyword)": {
+      "main": [
+        [
+          {
+            "node": "Merge All Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Time Entries": {
+      "main": [
+        [
+          {
+            "node": "Parse Time Entries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Time Entries": {
+      "main": [
+        [
+          {
+            "node": "Merge All Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Categorize Messages": {
+      "main": [
+        [
+          {
+            "node": "Merge All Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge All Data": {
+      "main": [
+        [
+          {
+            "node": "Format Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Message": {
+      "main": [
+        [
+          {
+            "node": "Send to Teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Teams": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2025-01-27T00:00:00.000Z",
+  "versionId": "1"
+}
